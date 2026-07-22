@@ -50,20 +50,16 @@ def process_raw_tickers(text_input):
 @st.cache_data(ttl=3600) # Cache clears every 1 hour
 def get_market_regime():
     try:
-        nifty = yf.download("^NSEI", period="1y", progress=False)
+        # yf.Ticker().history() guarantees a clean structure without MultiIndex issues
+        nifty = yf.Ticker("^NSEI").history(period="1y")
         
         # If Yahoo returns empty data, raise an error to bypass the cache
         if nifty.empty:
             raise ValueError("Empty data from Yahoo Finance")
             
-        # Extract Close prices safely
-        if 'Close' in nifty.columns:
-            close_series = nifty['Close']
-        elif isinstance(nifty.columns, pd.MultiIndex) and 'Close' in nifty.columns.levels[0]:
-            close_series = nifty['Close']
-        else:
-            close_series = nifty.iloc[:, 0]
+        close_series = nifty['Close']
         
+        # Calculate moving averages
         current_close = float(close_series.dropna().iloc[-1])
         sma50 = float(close_series.rolling(50).mean().dropna().iloc[-1])
         sma200 = float(close_series.rolling(200).mean().dropna().iloc[-1])
@@ -72,8 +68,7 @@ def get_market_regime():
         return is_bull, current_close, sma50, sma200
         
     except Exception as e:
-        # Returning None triggers the UI warning, but we use st.cache_data.clear() 
-        # so it tries again on the very next click instead of waiting an hour.
+        # Clear the cache so it retries instantly next time instead of waiting an hour
         st.cache_data.clear() 
         return None, 0, 0, 0
 
