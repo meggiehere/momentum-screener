@@ -45,32 +45,59 @@ def process_raw_tickers(text_input):
     return parsed_tickers
 
 # -------------------------------------------------------------------
-# Helper Function: Market Regime Filter (Cached for speed)
+# Helper Function: Market Regime Filter (Smoothed + Hysteresis)
 # -------------------------------------------------------------------
 @st.cache_data(ttl=3600) # Cache clears every 1 hour
 def get_market_regime():
     try:
-        # yf.Ticker().history() guarantees a clean structure without MultiIndex issues
-        nifty = yf.Ticker("^NSEI").history(period="1y")
+        # Fetching 2 years to ensure we have enough data to calculate the 
+        # 200-DMA and track historical hysteresis flips properly
+        nifty = yf.Ticker("^NSEI").history(period="2y")
         
-        # If Yahoo returns empty data, raise an error to bypass the cache
         if nifty.empty:
             raise ValueError("Empty data from Yahoo Finance")
             
         close_series = nifty['Close']
         
         # Calculate moving averages
-        current_close = float(close_series.dropna().iloc[-1])
-        sma50 = float(close_series.rolling(50).mean().dropna().iloc[-1])
-        sma200 = float(close_series.rolling(200).mean().dropna().iloc[-1])
+        sma5 = close_series.rolling(window=5).mean()
+        sma200 = close_series.rolling(window=200).mean()
         
-        is_bull = (current_close > sma50) and (current_close > sma200)
-        return is_bull, current_close, sma50, sma200
+        # Define the 1.5% Hysteresis Buffer Zones
+        upper_band = sma200 * 1.015
+        lower_band = sma200 * 0.985
+        
+        # Institutional Logic:
+        # 1 = Bull Regime (Breaks above Upper Band)
+        # -1 = Bear Regime (Breaks below Lower Band)
+        # NaN = Inside Buffer Zone (Will inherit previous state)
+        conditions = [
+            (sma5 > upper_band),
+            (sma5 < lower_band)
+        ]
+        choices = [1, -1]
+        
+        # Apply logic and forward-fill to "remember" the state in the buffer zone
+        raw_regime = np.select(conditions, choices, default=np.nan)
+        regime_series = pd.Series(raw_regime, index=close_series.index).ffill().dropna()
+        
+        current_close = float(close_series.dropna().iloc[-1])
+        current_sma5 = float(sma5.dropna().iloc[-1])
+        current_sma200 = float(sma200.dropna().iloc[-1])
+        current_upper = float(upper_band.dropna().iloc[-1])
+        current_lower = float(lower_band.dropna().iloc[-1])
+        
+        if regime_series.empty:
+            is_bull = False
+        else:
+            is_bull = True if regime_series.iloc[-1] == 1 else False
+            
+        return is_bull, current_close, current_sma5, current_sma200, current_upper, current_lower
         
     except Exception as e:
         # Clear the cache so it retries instantly next time instead of waiting an hour
         st.cache_data.clear() 
-        return None, 0, 0, 0
+        return None, 0, 0, 0, 0, 0
 
 # -------------------------------------------------------------------
 # 1. Page Configuration & Setup
@@ -142,11 +169,15 @@ tox_cutoff = st.sidebar.slider("Toxicity Cutoff (%)", 0, 50, 10)
 st.title("🚀 Quant Equity Screener: MK_MOMENTUM")
 
 # Market Regime UI Banner
-is_bull, nse_close, nse_50, nse_200 = get_market_regime()
+regime_data = get_market_regime()
+is_bull = regime_data[0]
+
 if is_bull is True:
-    st.success(f"🟢 **Bull Regime: Deploy Capital** | Nifty 50 ({nse_close:.0f}) is trading above its 50-DMA ({nse_50:.0f}) and 200-DMA ({nse_200:.0f}).")
+    _, nse_close, sma5, sma200, upper_band, lower_band = regime_data
+    st.success(f"🟢 **Bull Regime: Deploy Capital** | Nifty 50 5-DMA ({sma5:.0f}) is trending above the upper hysteresis band ({upper_band:.0f}). [200-DMA: {sma200:.0f}]")
 elif is_bull is False:
-    st.error(f"🔴 **Bear Regime: Hold Cash** | Nifty 50 ({nse_close:.0f}) has lost primary trend support (50-DMA: {nse_50:.0f}, 200-DMA: {nse_200:.0f}).")
+    _, nse_close, sma5, sma200, upper_band, lower_band = regime_data
+    st.error(f"🔴 **Bear Regime: Hold Cash** | Nifty 50 5-DMA ({sma5:.0f}) has lost primary trend support and sits below the lower hysteresis band ({lower_band:.0f}). [200-DMA: {sma200:.0f}]")
 else:
     st.warning("⚠️ Market Regime data temporarily unavailable.")
 
