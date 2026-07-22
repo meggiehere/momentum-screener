@@ -2,12 +2,35 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import json
+import os
+
+# -------------------------------------------------------------------
+# File Storage Setup (For Permanent Memory)
+# -------------------------------------------------------------------
+SAVE_FILE = "saved_universes.json"
+
+def load_saved_lists():
+    """Loads the saved lists from a local JSON file."""
+    if os.path.exists(SAVE_FILE):
+        with open(SAVE_FILE, "r") as f:
+            return json.load(f)
+    return {"nse_500": "", "custom": "", "oneoff": ""}
+
+def save_lists_to_file(nse_500, custom, oneoff):
+    """Saves the current lists to a local JSON file."""
+    data = {
+        "nse_500": nse_500,
+        "custom": custom,
+        "oneoff": oneoff
+    }
+    with open(SAVE_FILE, "w") as f:
+        json.dump(data, f)
 
 # -------------------------------------------------------------------
 # Helper Function: Smart Ticker Logic
 # -------------------------------------------------------------------
 def process_raw_tickers(text_input):
-    """Parses raw text, applies .NS or .BO smartly, and returns a list."""
     parsed_tickers = []
     raw_tickers = text_input.replace('\n', ',').split(',')
     
@@ -39,14 +62,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# Persistent Memory Setup (Prevents text from vanishing)
+# Persistent Memory Initialization
 # -------------------------------------------------------------------
+saved_data = load_saved_lists()
+
 if 'memory_nse500' not in st.session_state:
-    st.session_state['memory_nse500'] = ""
+    st.session_state['memory_nse500'] = saved_data.get('nse_500', "")
 if 'memory_custom' not in st.session_state:
-    st.session_state['memory_custom'] = ""
+    st.session_state['memory_custom'] = saved_data.get('custom', "")
 if 'memory_oneoff' not in st.session_state:
-    st.session_state['memory_oneoff'] = ""
+    st.session_state['memory_oneoff'] = saved_data.get('oneoff', "")
 
 # -------------------------------------------------------------------
 # 2. Sidebar: Strategy Settings & Parameters
@@ -67,7 +92,7 @@ w3 = st.sidebar.number_input("Quality (W3)", min_value=0, max_value=100, value=0
 
 w_total = w1 + w2 + w3
 if w_total != 100:
-    st.sidebar.warning(f"⚠️ Weights sum to {w_total}, not 100. They will be normalized automatically.")
+    st.sidebar.warning(f"⚠️ Weights sum to {w_total}, not 100.")
 
 st.sidebar.header("2. Timeframe Blend (Sum=1.0)")
 w_12m = st.sidebar.number_input("12M Return Weight", min_value=0.0, max_value=1.0, value=0.50, step=0.05)
@@ -81,40 +106,35 @@ nh_lookback = st.sidebar.slider("NearHigh Lookback (Days)", 63, 504, 252)
 
 st.sidebar.header("4. Portfolio Risk Controls")
 trail_sl_pct = st.sidebar.slider("Trailing Stop Loss (%)", 5, 30, 15)
-tox_cutoff = st.sidebar.slider("Toxicity Cutoff (%)", 0, 50, 10, help="Excludes top X% most volatile downside stocks")
+tox_cutoff = st.sidebar.slider("Toxicity Cutoff (%)", 0, 50, 10)
 
 # -------------------------------------------------------------------
-# 3. Main UI: Data Input
+# 3. Main UI: Data Input & Auto-Saving
 # -------------------------------------------------------------------
 st.title("🚀 Quant Equity Screener: MK_MOMENTUM")
-st.markdown("Rank Indian Equities (NSE/BSE) using a factor-momentum and downside-risk algorithmic engine.")
 
 tickers = []
 
 if universe_choice == "NSE Top 500":
     st.subheader("📥 NSE Top 500 Universe")
-    st.info("Your pasted tickers are securely saved in memory even if you switch menus.")
+    st.info("Your list is automatically saved to the server. It will remain here even if you close the app.")
     
-    # Render text area using the permanent memory
-    st.session_state['memory_nse500'] = st.text_area(
-        "Paste NSE Top 500 Tickers:", 
-        value=st.session_state['memory_nse500'], 
-        height=150
-    )
+    new_text = st.text_area("Paste NSE Top 500 Tickers:", value=st.session_state['memory_nse500'], height=150)
+    if new_text != st.session_state['memory_nse500']:
+        st.session_state['memory_nse500'] = new_text
+        save_lists_to_file(st.session_state['memory_nse500'], st.session_state['memory_custom'], st.session_state['memory_oneoff'])
     
     if st.session_state['memory_nse500']:
         tickers = process_raw_tickers(st.session_state['memory_nse500'])
 
 elif universe_choice == "Custom Universe (Screener)":
     st.subheader("📥 Custom Universe (Small/Micro Caps)")
-    st.info("Your pasted tickers are securely saved in memory even if you switch menus.")
+    st.info("Your list is automatically saved to the server. It will remain here even if you close the app.")
     
-    # Render text area using the permanent memory
-    st.session_state['memory_custom'] = st.text_area(
-        "Paste Custom Tickers:", 
-        value=st.session_state['memory_custom'], 
-        height=150
-    )
+    new_text = st.text_area("Paste Custom Tickers:", value=st.session_state['memory_custom'], height=150)
+    if new_text != st.session_state['memory_custom']:
+        st.session_state['memory_custom'] = new_text
+        save_lists_to_file(st.session_state['memory_nse500'], st.session_state['memory_custom'], st.session_state['memory_oneoff'])
     
     if st.session_state['memory_custom']:
         tickers = process_raw_tickers(st.session_state['memory_custom'])
@@ -124,11 +144,10 @@ elif universe_choice == "One-Off List / CSV":
     col1, col2 = st.columns(2)
 
     with col1:
-        st.session_state['memory_oneoff'] = st.text_area(
-            "Paste Tickers:", 
-            value=st.session_state['memory_oneoff'], 
-            height=150
-        )
+        new_text = st.text_area("Paste Tickers:", value=st.session_state['memory_oneoff'], height=150)
+        if new_text != st.session_state['memory_oneoff']:
+            st.session_state['memory_oneoff'] = new_text
+            save_lists_to_file(st.session_state['memory_nse500'], st.session_state['memory_custom'], st.session_state['memory_oneoff'])
 
     with col2:
         uploaded_file = st.file_uploader("Upload CSV (Must contain a 'Ticker' column)", type=['csv'])
@@ -139,8 +158,6 @@ elif universe_choice == "One-Off List / CSV":
             ticker_col = next((col for col in df_upload.columns if 'ticker' in col.lower()), None)
             if ticker_col:
                 tickers.extend(df_upload[ticker_col].dropna().astype(str).tolist())
-            else:
-                st.error("CSV must contain a column named 'Ticker'")
         except Exception as e:
             st.error(f"Error reading CSV: {e}")
 
@@ -157,17 +174,13 @@ st.write(f"**Total unique tickers ready for processing:** {len(tickers)}")
 if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
     status_text.text("Fetching market data from Yahoo Finance...")
     
     try:
         raw_data = yf.download(tickers, period="2y", progress=False)
         
         if len(tickers) == 1:
-            if 'Close' in raw_data.columns:
-                prices_df = raw_data[['Close']].rename(columns={'Close': tickers[0]})
-            else:
-                prices_df = pd.DataFrame()
+            prices_df = raw_data[['Close']].rename(columns={'Close': tickers[0]}) if 'Close' in raw_data.columns else pd.DataFrame()
         else:
             if 'Close' in raw_data.columns:
                 prices_df = raw_data['Close']
@@ -177,7 +190,7 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
                 prices_df = raw_data
                 
         if prices_df.empty:
-            st.error("Could not find price data for the provided tickers.")
+            st.error("Could not find price data.")
             st.stop()
             
         progress_bar.progress(30)
@@ -188,11 +201,10 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         valid_tickers = valid_counts[valid_counts >= min_required_days].index.tolist()
         
         if not valid_tickers:
-            st.error(f"No tickers have the minimum required history of {min_required_days} trading days.")
+            st.error("No tickers have enough history.")
             st.stop()
             
-        prices_df = prices_df[valid_tickers]
-        prices_df = prices_df.ffill(limit=5)
+        prices_df = prices_df[valid_tickers].ffill(limit=5)
         
         progress_bar.progress(50)
         status_text.text("Calculating Multi-Timeframe Blended Returns & Risk...")
@@ -206,7 +218,6 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         R_12M = (P_skip / P_12M) - 1
         R_6M  = (P_skip / P_6M) - 1
         R_3M  = (P_skip / P_3M) - 1
-        
         R_blend = (w_12m * R_12M) + (w_6m * R_6M) + (w_3m * R_3M)
 
         daily_returns = prices_df.pct_change(1)
@@ -214,10 +225,9 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         DD_126 = np.sqrt((negative_returns ** 2).rolling(dd_lookback).sum().iloc[-1] / dd_lookback)
 
         progress_bar.progress(70)
-        status_text.text("Evaluating 52-Week High Proximity & Quality...")
+        status_text.text("Evaluating Proximity & Quality...")
 
         Score_raw = R_blend / (DD_126 + 0.002)
-
         High_52W = prices_df.rolling(nh_lookback).max().iloc[-1]
         NearHigh = current_price / High_52W
         Quality = (daily_returns > 0).rolling(dd_lookback).sum().iloc[-1] / dd_lookback
@@ -238,19 +248,16 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
 
         def calc_percentile(series):
             s_clean = series.dropna()
-            N = len(s_clean)
-            if N <= 1:
+            if len(s_clean) <= 1:
                 return pd.Series(100.0, index=s_clean.index)
-            return (s_clean.rank(method='min') - 1) / (N - 1) * 100.0
+            return (s_clean.rank(method='min') - 1) / (len(s_clean) - 1) * 100.0
 
         Percentile_ScoreRaw = calc_percentile(Score_raw)
         Percentile_NearHigh = calc_percentile(NearHigh)
         Percentile_Quality  = calc_percentile(Quality)
 
         w_tot = w_total if w_total > 0 else 1
-        norm_w1, norm_w2, norm_w3 = (w1/w_tot), (w2/w_tot), (w3/w_tot)
-
-        Score_Final = (norm_w1 * Percentile_ScoreRaw) + (norm_w2 * Percentile_NearHigh) + (norm_w3 * Percentile_Quality)
+        Score_Final = ((w1/w_tot) * Percentile_ScoreRaw) + ((w2/w_tot) * Percentile_NearHigh) + ((w3/w_tot) * Percentile_Quality)
 
         results_df = pd.DataFrame({
             'Ticker': Score_Final.index,
@@ -260,42 +267,27 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
             'Downside Dev (%)': DD_126.values * 100,
             'NearHigh Ratio': NearHigh.values,
             'Stop-Loss (₹)': current_price.values * (1 - (trail_sl_pct / 100))
-        })
-
-        results_df = results_df.sort_values(by='Score_Final', ascending=False).reset_index(drop=True)
+        }).sort_values(by='Score_Final', ascending=False).reset_index(drop=True)
+        
         results_df.index = results_df.index + 1
         results_df.index.name = 'Rank'
         
-        results_df['Price (₹)'] = results_df['Price (₹)'].round(2)
-        results_df['Score_Final'] = results_df['Score_Final'].round(2)
-        results_df['Blended Return (%)'] = results_df['Blended Return (%)'].round(2)
-        results_df['Downside Dev (%)'] = results_df['Downside Dev (%)'].round(2)
+        for col in ['Price (₹)', 'Score_Final', 'Blended Return (%)', 'Downside Dev (%)', 'Stop-Loss (₹)']:
+            results_df[col] = results_df[col].round(2)
         results_df['NearHigh Ratio'] = results_df['NearHigh Ratio'].round(3)
-        results_df['Stop-Loss (₹)'] = results_df['Stop-Loss (₹)'].round(2)
 
         progress_bar.progress(100)
         status_text.success(f"✅ Calculation complete! {len(results_df)} stocks qualified.")
 
-        # -------------------------------------------------------------------
-        # 5. Dashboard Output
-        # -------------------------------------------------------------------
         st.subheader("🏆 Leaderboard")
         st.dataframe(
             results_df.style.background_gradient(cmap='RdYlGn', subset=['Score_Final', 'Blended Return (%)'])
                           .background_gradient(cmap='RdYlGn_r', subset=['Downside Dev (%)']),
-            use_container_width=True,
-            height=600
+            use_container_width=True, height=600
         )
 
-        csv = results_df.to_csv()
-        st.download_button(
-            label="📥 Download Rankings CSV",
-            data=csv,
-            file_name="mk_momentum_rankings.csv",
-            mime="text/csv",
-        )
+        st.download_button("📥 Download Rankings CSV", data=results_df.to_csv(), file_name="mk_momentum_rankings.csv", mime="text/csv")
 
     except Exception as e:
         status_text.empty()
-        st.error(f"An error occurred during execution: {str(e)}")
-        st.exception(e)
+        st.error(f"An error occurred: {str(e)}")
