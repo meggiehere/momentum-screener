@@ -39,12 +39,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
+# Persistent Memory Setup (Prevents text from vanishing)
+# -------------------------------------------------------------------
+if 'memory_nse500' not in st.session_state:
+    st.session_state['memory_nse500'] = ""
+if 'memory_custom' not in st.session_state:
+    st.session_state['memory_custom'] = ""
+if 'memory_oneoff' not in st.session_state:
+    st.session_state['memory_oneoff'] = ""
+
+# -------------------------------------------------------------------
 # 2. Sidebar: Strategy Settings & Parameters
 # -------------------------------------------------------------------
 st.sidebar.title("⚙️ Strategy Settings")
 
 st.sidebar.header("0. Select Target Universe")
-# This dropdown decides which list we are processing right now
 universe_choice = st.sidebar.selectbox(
     "Choose which universe to rank:", 
     ["NSE Top 500", "Custom Universe (Screener)", "One-Off List / CSV"]
@@ -84,26 +93,42 @@ tickers = []
 
 if universe_choice == "NSE Top 500":
     st.subheader("📥 NSE Top 500 Universe")
-    st.info("Paste your NSE 500 list here. Streamlit will remember this list while the app remains open.")
-    # The 'key' ensures Streamlit saves the state of this specific text box in memory
-    nse_text = st.text_area("Paste NSE Top 500 Tickers:", key="nse_500_input", height=150)
-    if nse_text:
-        tickers = process_raw_tickers(nse_text)
+    st.info("Your pasted tickers are securely saved in memory even if you switch menus.")
+    
+    # Render text area using the permanent memory
+    st.session_state['memory_nse500'] = st.text_area(
+        "Paste NSE Top 500 Tickers:", 
+        value=st.session_state['memory_nse500'], 
+        height=150
+    )
+    
+    if st.session_state['memory_nse500']:
+        tickers = process_raw_tickers(st.session_state['memory_nse500'])
 
 elif universe_choice == "Custom Universe (Screener)":
     st.subheader("📥 Custom Universe (Small/Micro Caps)")
-    st.info("Paste your Screener results here. Streamlit will remember this list while the app remains open.")
-    # A different 'key' means this is treated as a completely separate memory bank
-    custom_text = st.text_area("Paste Custom Tickers:", key="custom_input", height=150)
-    if custom_text:
-        tickers = process_raw_tickers(custom_text)
+    st.info("Your pasted tickers are securely saved in memory even if you switch menus.")
+    
+    # Render text area using the permanent memory
+    st.session_state['memory_custom'] = st.text_area(
+        "Paste Custom Tickers:", 
+        value=st.session_state['memory_custom'], 
+        height=150
+    )
+    
+    if st.session_state['memory_custom']:
+        tickers = process_raw_tickers(st.session_state['memory_custom'])
 
 elif universe_choice == "One-Off List / CSV":
     st.subheader("📥 One-Off Manual Input or CSV")
     col1, col2 = st.columns(2)
 
     with col1:
-        oneoff_text = st.text_area("Paste Tickers:", key="oneoff_input", height=150)
+        st.session_state['memory_oneoff'] = st.text_area(
+            "Paste Tickers:", 
+            value=st.session_state['memory_oneoff'], 
+            height=150
+        )
 
     with col2:
         uploaded_file = st.file_uploader("Upload CSV (Must contain a 'Ticker' column)", type=['csv'])
@@ -119,8 +144,8 @@ elif universe_choice == "One-Off List / CSV":
         except Exception as e:
             st.error(f"Error reading CSV: {e}")
 
-    if oneoff_text:
-        tickers.extend(process_raw_tickers(oneoff_text))
+    if st.session_state['memory_oneoff']:
+        tickers.extend(process_raw_tickers(st.session_state['memory_oneoff']))
 
 # Deduplicate tickers
 tickers = list(set(tickers))
