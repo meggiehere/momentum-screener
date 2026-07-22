@@ -59,11 +59,27 @@ st.subheader("📥 Input Tickers")
 col1, col2 = st.columns(2)
 
 with col1:
-    ticker_text = st.text_area(
-        "Paste Tickers (Comma or newline separated)",
-        "RELIANCE.NS, TCS.NS, INFY.NS, HDFCBANK.NS, ICICIBANK.NS",
-        height=150
-    )
+    if ticker_text:
+    # Replace newlines with commas, split, and iterate
+    raw_tickers = ticker_text.replace('\n', ',').split(',')
+    
+    for t in raw_tickers:
+        t = t.strip().upper()
+        
+        # Skip empty strings
+        if not t:
+            continue
+            
+        # Check if the user already included a suffix
+        if not (t.endswith('.NS') or t.endswith('.BO')):
+            # If the ticker is strictly digits, it's a BSE stock
+            if t.isdigit():
+                t = f"{t}.BO"
+            # Otherwise, default to NSE
+            else:
+                t = f"{t}.NS"
+                
+        tickers.append(t)
 
 with col2:
     uploaded_file = st.file_uploader("Or Upload CSV (Must contain a 'Ticker' column)", type=['csv'])
