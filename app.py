@@ -51,11 +51,18 @@ def process_raw_tickers(text_input):
 def get_market_regime():
     try:
         nifty = yf.download("^NSEI", period="1y", progress=False)
+        
+        # If Yahoo returns empty data, raise an error to bypass the cache
         if nifty.empty:
-            return None, 0, 0, 0
+            raise ValueError("Empty data from Yahoo Finance")
             
-        # Extract Close prices safely depending on yfinance output structure
-        close_series = nifty['Close'] if 'Close' in nifty.columns else nifty.iloc[:, 0]
+        # Extract Close prices safely
+        if 'Close' in nifty.columns:
+            close_series = nifty['Close']
+        elif isinstance(nifty.columns, pd.MultiIndex) and 'Close' in nifty.columns.levels[0]:
+            close_series = nifty['Close']
+        else:
+            close_series = nifty.iloc[:, 0]
         
         current_close = float(close_series.dropna().iloc[-1])
         sma50 = float(close_series.rolling(50).mean().dropna().iloc[-1])
@@ -63,7 +70,11 @@ def get_market_regime():
         
         is_bull = (current_close > sma50) and (current_close > sma200)
         return is_bull, current_close, sma50, sma200
-    except Exception:
+        
+    except Exception as e:
+        # Returning None triggers the UI warning, but we use st.cache_data.clear() 
+        # so it tries again on the very next click instead of waiting an hour.
+        st.cache_data.clear() 
         return None, 0, 0, 0
 
 # -------------------------------------------------------------------
