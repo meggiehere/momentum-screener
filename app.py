@@ -45,6 +45,28 @@ def process_raw_tickers(text_input):
     return parsed_tickers
 
 # -------------------------------------------------------------------
+# Helper Function: Market Regime Filter (Cached for speed)
+# -------------------------------------------------------------------
+@st.cache_data(ttl=3600) # Cache clears every 1 hour
+def get_market_regime():
+    try:
+        nifty = yf.download("^NSEI", period="1y", progress=False)
+        if nifty.empty:
+            return None, 0, 0, 0
+            
+        # Extract Close prices safely depending on yfinance output structure
+        close_series = nifty['Close'] if 'Close' in nifty.columns else nifty.iloc[:, 0]
+        
+        current_close = float(close_series.dropna().iloc[-1])
+        sma50 = float(close_series.rolling(50).mean().dropna().iloc[-1])
+        sma200 = float(close_series.rolling(200).mean().dropna().iloc[-1])
+        
+        is_bull = (current_close > sma50) and (current_close > sma200)
+        return is_bull, current_close, sma50, sma200
+    except Exception:
+        return None, 0, 0, 0
+
+# -------------------------------------------------------------------
 # 1. Page Configuration & Setup
 # -------------------------------------------------------------------
 st.set_page_config(
@@ -105,14 +127,24 @@ dd_lookback = st.sidebar.slider("Downside Lookback (Days)", 30, 252, 126)
 nh_lookback = st.sidebar.slider("NearHigh Lookback (Days)", 63, 504, 252)
 
 st.sidebar.header("4. Portfolio Risk Controls")
-trail_sl_pct = st.sidebar.slider("Trailing Stop Loss (%)", 5, 30, 15)
+atr_mult = st.sidebar.slider("ATR Stop Multiplier", min_value=1.0, max_value=5.0, value=3.0, step=0.1)
 tox_cutoff = st.sidebar.slider("Toxicity Cutoff (%)", 0, 50, 10)
 
 # -------------------------------------------------------------------
-# 3. Main UI: Data Input & Auto-Saving
+# 3. Main UI: Data Input & Market Regime
 # -------------------------------------------------------------------
 st.title("🚀 Quant Equity Screener: MK_MOMENTUM")
 
+# Market Regime UI Banner
+is_bull, nse_close, nse_50, nse_200 = get_market_regime()
+if is_bull is True:
+    st.success(f"🟢 **Bull Regime: Deploy Capital** | Nifty 50 ({nse_close:.0f}) is trading above its 50-DMA ({nse_50:.0f}) and 200-DMA ({nse_200:.0f}).")
+elif is_bull is False:
+    st.error(f"🔴 **Bear Regime: Hold Cash** | Nifty 50 ({nse_close:.0f}) has lost primary trend support (50-DMA: {nse_50:.0f}, 200-DMA: {nse_200:.0f}).")
+else:
+    st.warning("⚠️ Market Regime data temporarily unavailable.")
+
+st.markdown("---")
 tickers = []
 
 if universe_choice == "NSE Top 500":
@@ -174,26 +206,29 @@ st.write(f"**Total unique tickers ready for processing:** {len(tickers)}")
 if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
     progress_bar = st.progress(0)
     status_text = st.empty()
-    status_text.text("Fetching market data from Yahoo Finance...")
+    status_text.text("Fetching market data (High, Low, Close) from Yahoo Finance...")
     
     try:
         raw_data = yf.download(tickers, period="2y", progress=False)
         
+        # Safely parse multi-ticker vs single-ticker structures
         if len(tickers) == 1:
-            prices_df = raw_data[['Close']].rename(columns={'Close': tickers[0]}) if 'Close' in raw_data.columns else pd.DataFrame()
+            prices_df = raw_data[['Close']].copy()
+            prices_df.columns = [tickers[0]]
+            high_df = raw_data[['High']].copy()
+            high_df.columns = [tickers[0]]
+            low_df = raw_data[['Low']].copy()
+            low_df.columns = [tickers[0]]
         else:
-            if 'Close' in raw_data.columns:
-                prices_df = raw_data['Close']
-            elif isinstance(raw_data.columns, pd.MultiIndex) and 'Close' in raw_data.columns.levels[0]:
-                prices_df = raw_data['Close']
-            else:
-                prices_df = raw_data
+            prices_df = raw_data['Close']
+            high_df = raw_data['High']
+            low_df = raw_data['Low']
                 
         if prices_df.empty:
             st.error("Could not find price data.")
             st.stop()
             
-        progress_bar.progress(30)
+        progress_bar.progress(20)
         status_text.text("Data fetched. Applying minimum data filters...")
 
         min_required_days = 252 + skip_days
@@ -204,9 +239,25 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
             st.error("No tickers have enough history.")
             st.stop()
             
+        # Filter and forward-fill missing data across all price frames
         prices_df = prices_df[valid_tickers].ffill(limit=5)
+        high_df = high_df[valid_tickers].ffill(limit=5)
+        low_df = low_df[valid_tickers].ffill(limit=5)
         
-        progress_bar.progress(50)
+        progress_bar.progress(40)
+        status_text.text("Calculating 14-Day Average True Range (ATR)...")
+
+        # Calculate True Range (Vectorized)
+        prev_close = prices_df.shift(1)
+        tr1 = high_df - low_df
+        tr2 = (high_df - prev_close).abs()
+        tr3 = (low_df - prev_close).abs()
+        
+        true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+        # 14-Day Simple Moving Average of True Range
+        atr_14 = true_range.rolling(window=14).mean().iloc[-1]
+
+        progress_bar.progress(55)
         status_text.text("Calculating Multi-Timeframe Blended Returns & Risk...")
 
         current_price = prices_df.iloc[-1]
@@ -242,6 +293,7 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
             current_price = current_price[valid_mask]
             R_blend = R_blend[valid_mask]
             DD_126 = DD_126[valid_mask]
+            atr_14 = atr_14[valid_mask]
             
         progress_bar.progress(85)
         status_text.text("Normalizing and generating final ranks...")
@@ -259,6 +311,9 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         w_tot = w_total if w_total > 0 else 1
         Score_Final = ((w1/w_tot) * Percentile_ScoreRaw) + ((w2/w_tot) * Percentile_NearHigh) + ((w3/w_tot) * Percentile_Quality)
 
+        # Calculate Dynamic ATR Stop Loss
+        atr_stop_loss = current_price - (atr_14 * atr_mult)
+
         results_df = pd.DataFrame({
             'Ticker': Score_Final.index,
             'Price (₹)': current_price.values,
@@ -266,13 +321,13 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
             'Blended Return (%)': R_blend.values * 100,
             'Downside Dev (%)': DD_126.values * 100,
             'NearHigh Ratio': NearHigh.values,
-            'Stop-Loss (₹)': current_price.values * (1 - (trail_sl_pct / 100))
+            'ATR Stop-Loss (₹)': atr_stop_loss.values
         }).sort_values(by='Score_Final', ascending=False).reset_index(drop=True)
         
         results_df.index = results_df.index + 1
         results_df.index.name = 'Rank'
         
-        for col in ['Price (₹)', 'Score_Final', 'Blended Return (%)', 'Downside Dev (%)', 'Stop-Loss (₹)']:
+        for col in ['Price (₹)', 'Score_Final', 'Blended Return (%)', 'Downside Dev (%)', 'ATR Stop-Loss (₹)']:
             results_df[col] = results_df[col].round(2)
         results_df['NearHigh Ratio'] = results_df['NearHigh Ratio'].round(3)
 
