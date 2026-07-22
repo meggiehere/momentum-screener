@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import io
 
 # -------------------------------------------------------------------
 # 1. Page Configuration & Setup
@@ -32,8 +31,9 @@ w1 = st.sidebar.number_input("Momentum (W1)", min_value=0, max_value=100, value=
 w2 = st.sidebar.number_input("NearHigh (W2)", min_value=0, max_value=100, value=20, step=5)
 w3 = st.sidebar.number_input("Quality (W3)", min_value=0, max_value=100, value=0, step=5)
 
-if (w1 + w2 + w3) != 100:
-    st.sidebar.warning(f"⚠️ Weights sum to {w1+w2+w3}, not 100. They will be normalized.")
+w_total = w1 + w2 + w3
+if w_total != 100:
+    st.sidebar.warning(f"⚠️ Weights sum to {w_total}, not 100. They will be normalized automatically.")
 
 st.sidebar.header("2. Timeframe Blend (Sum=1.0)")
 w_12m = st.sidebar.number_input("12M Return Weight", min_value=0.0, max_value=1.0, value=0.50, step=0.05)
@@ -59,37 +59,22 @@ st.subheader("📥 Input Tickers")
 col1, col2 = st.columns(2)
 
 with col1:
-    if ticker_text:
-        # Replace newlines with commas, split, and iterate
-        raw_tickers = ticker_text.replace('\n', ',').split(',')
-        
-        for t in raw_tickers:
-            t = t.strip().upper()
-            
-            # Skip empty strings
-            if not t:
-                continue
-                
-            # Check if the user already included a suffix
-            if not (t.endswith('.NS') or t.endswith('.BO')):
-                # If the ticker is strictly digits, it's a BSE stock
-                if t.isdigit():
-                    t = f"{t}.BO"
-                # Otherwise, default to NSE
-                else:
-                    t = f"{t}.NS"
-                    
-            tickers.append(t)
+    ticker_text = st.text_area(
+        "Paste Tickers (Comma or newline separated)",
+        "RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK, 544026",
+        height=150
+    )
 
 with col2:
     uploaded_file = st.file_uploader("Or Upload CSV (Must contain a 'Ticker' column)", type=['csv'])
 
 # Process Tickers
 tickers = []
+
+# Process CSV if uploaded
 if uploaded_file is not None:
     try:
         df_upload = pd.read_csv(uploaded_file)
-        # Find column containing 'ticker' (case insensitive)
         ticker_col = next((col for col in df_upload.columns if 'ticker' in col.lower()), None)
         if ticker_col:
             tickers.extend(df_upload[ticker_col].dropna().astype(str).tolist())
@@ -98,12 +83,29 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Error reading CSV: {e}")
 
+# Process Text Area using Smart Logic
 if ticker_text:
-    # Replace newlines with commas, split, strip, and filter empty strings
     raw_tickers = ticker_text.replace('\n', ',').split(',')
-    tickers.extend([t.strip().upper() for t in raw_tickers if t.strip()])
+    
+    for t in raw_tickers:
+        t = t.strip().upper()
+        
+        # Skip empty strings
+        if not t:
+            continue
+            
+        # Check if the user already included a suffix
+        if not (t.endswith('.NS') or t.endswith('.BO')):
+            # If the ticker is strictly digits, it's a BSE stock
+            if t.isdigit():
+                t = f"{t}.BO"
+            # Otherwise, default to NSE
+            else:
+                t = f"{t}.NS"
+                
+        tickers.append(t)
 
-# Deduplicate
+# Deduplicate tickers
 tickers = list(set(tickers))
 
 st.write(f"**Total unique tickers loaded:** {len(tickers)}")
@@ -118,26 +120,32 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
     status_text.text("Fetching market data from Yahoo Finance...")
     
     try:
-        # Fetch data: Ensure enough history (410 calendar days roughly translates to >252 trading days)
-        # We'll fetch 2 years to be safe for rolling windows.
+        # Fetch data: 2 years history to ensure enough data for 252-day lookbacks
         raw_data = yf.download(tickers, period="2y", progress=False)
         
-        # Handle yfinance single vs multi-ticker output structure
+        # Handle yfinance single vs multi-ticker output structure gracefully
         if len(tickers) == 1:
-            prices_df = raw_data[['Close']].rename(columns={'Close': tickers[0]})
+            if 'Close' in raw_data.columns:
+                prices_df = raw_data[['Close']].rename(columns={'Close': tickers[0]})
+            else:
+                prices_df = pd.DataFrame()
         else:
+            # yfinance returns MultiIndex columns for multiple tickers
             if 'Close' in raw_data.columns:
                 prices_df = raw_data['Close']
-            elif 'Adj Close' in raw_data.columns:
-                prices_df = raw_data['Adj Close']
+            elif isinstance(raw_data.columns, pd.MultiIndex) and 'Close' in raw_data.columns.levels[0]:
+                prices_df = raw_data['Close']
             else:
-                st.error("Could not find 'Close' prices in downloaded data.")
-                st.stop()
-        
+                prices_df = raw_data
+                
+        if prices_df.empty:
+            st.error("Could not find price data for the provided tickers.")
+            st.stop()
+            
         progress_bar.progress(30)
         status_text.text("Data fetched. Applying minimum data filters...")
 
-        # E. Minimum Data Filter: (252 + SKIP) trading days
+        # Minimum Data Filter: (252 + SKIP) trading days
         min_required_days = 252 + skip_days
         valid_counts = prices_df.count()
         valid_tickers = valid_counts[valid_counts >= min_required_days].index.tolist()
@@ -147,15 +155,13 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
             st.stop()
             
         prices_df = prices_df[valid_tickers]
-        # Forward fill up to 5 days to handle minor data gaps, then drop remaining NaNs at the top
+        # Forward fill up to 5 days to handle minor data gaps
         prices_df = prices_df.ffill(limit=5)
         
         progress_bar.progress(50)
         status_text.text("Calculating Multi-Timeframe Blended Returns & Risk...")
 
         # Core Mathematical Logic Vectorization
-        
-        # Extract specific price slices
         current_price = prices_df.iloc[-1]
         P_skip = prices_df.iloc[-(1 + skip_days)]
         P_12M = prices_df.iloc[-(252 + skip_days + 1)]
@@ -172,7 +178,6 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         # B. Downside Deviation
         daily_returns = prices_df.pct_change(1)
         negative_returns = daily_returns.clip(upper=0)
-        # Using the last available rolling calculation
         DD_126 = np.sqrt((negative_returns ** 2).rolling(dd_lookback).sum().iloc[-1] / dd_lookback)
 
         progress_bar.progress(70)
@@ -186,11 +191,11 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         NearHigh = current_price / High_52W
         Quality = (daily_returns > 0).rolling(dd_lookback).sum().iloc[-1] / dd_lookback
 
-        # Apply Toxicity Cutoff (Exclude top X% highest DD_126)
+        # Apply Toxicity Cutoff
         if tox_cutoff > 0:
             dd_threshold = np.percentile(DD_126.dropna(), 100 - tox_cutoff)
             valid_mask = DD_126 <= dd_threshold
-            # Filter all series
+            
             Score_raw = Score_raw[valid_mask]
             NearHigh = NearHigh[valid_mask]
             Quality = Quality[valid_mask]
@@ -201,13 +206,12 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         progress_bar.progress(85)
         status_text.text("Normalizing and generating final ranks...")
 
-        # F. Percentile Normalization (Strictly Less Than Rank: (rank - 1) / (N - 1) * 100)
+        # F. Percentile Normalization (Strictly Less Than Rank)
         def calc_percentile(series):
             s_clean = series.dropna()
             N = len(s_clean)
             if N <= 1:
                 return pd.Series(100.0, index=s_clean.index)
-            # method='min' ensures tie breaking, -1 as per formula
             return (s_clean.rank(method='min') - 1) / (N - 1) * 100.0
 
         Percentile_ScoreRaw = calc_percentile(Score_raw)
@@ -215,9 +219,9 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         Percentile_Quality  = calc_percentile(Quality)
 
         # G. Final Composite Score
-        # Normalize weights if they don't sum to 100
-        w_total = w1 + w2 + w3
-        norm_w1, norm_w2, norm_w3 = (w1/w_total), (w2/w_total), (w3/w_total)
+        # Avoid division by zero if all weights are set to 0
+        w_tot = w_total if w_total > 0 else 1
+        norm_w1, norm_w2, norm_w3 = (w1/w_tot), (w2/w_tot), (w3/w_tot)
 
         Score_Final = (norm_w1 * Percentile_ScoreRaw) + (norm_w2 * Percentile_NearHigh) + (norm_w3 * Percentile_Quality)
 
@@ -237,7 +241,7 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         results_df.index = results_df.index + 1
         results_df.index.name = 'Rank'
         
-        # Round columns for clean display
+        # Format table numbers
         results_df['Price (₹)'] = results_df['Price (₹)'].round(2)
         results_df['Score_Final'] = results_df['Score_Final'].round(2)
         results_df['Blended Return (%)'] = results_df['Blended Return (%)'].round(2)
