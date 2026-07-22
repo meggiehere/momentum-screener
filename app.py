@@ -11,14 +11,12 @@ import os
 SAVE_FILE = "saved_universes.json"
 
 def load_saved_lists():
-    """Loads the saved lists from a local JSON file."""
     if os.path.exists(SAVE_FILE):
         with open(SAVE_FILE, "r") as f:
             return json.load(f)
     return {"nse_500": "", "custom": "", "oneoff": ""}
 
 def save_lists_to_file(nse_500, custom, oneoff):
-    """Saves the current lists to a local JSON file."""
     data = {
         "nse_500": nse_500,
         "custom": custom,
@@ -47,11 +45,9 @@ def process_raw_tickers(text_input):
 # -------------------------------------------------------------------
 # Helper Function: Market Regime Filter (Smoothed + Hysteresis)
 # -------------------------------------------------------------------
-@st.cache_data(ttl=3600) # Cache clears every 1 hour
+@st.cache_data(ttl=3600) 
 def get_market_regime():
     try:
-        # Fetching 2 years to ensure we have enough data to calculate the 
-        # 200-DMA and track historical hysteresis flips properly
         nifty = yf.Ticker("^NSEI").history(period="2y")
         
         if nifty.empty:
@@ -59,25 +55,18 @@ def get_market_regime():
             
         close_series = nifty['Close']
         
-        # Calculate moving averages
         sma5 = close_series.rolling(window=5).mean()
         sma200 = close_series.rolling(window=200).mean()
         
-        # Define the 1.5% Hysteresis Buffer Zones
         upper_band = sma200 * 1.015
         lower_band = sma200 * 0.985
         
-        # Institutional Logic:
-        # 1 = Bull Regime (Breaks above Upper Band)
-        # -1 = Bear Regime (Breaks below Lower Band)
-        # NaN = Inside Buffer Zone (Will inherit previous state)
         conditions = [
             (sma5 > upper_band),
             (sma5 < lower_band)
         ]
         choices = [1, -1]
         
-        # Apply logic and forward-fill to "remember" the state in the buffer zone
         raw_regime = np.select(conditions, choices, default=np.nan)
         regime_series = pd.Series(raw_regime, index=close_series.index).ffill().dropna()
         
@@ -95,7 +84,6 @@ def get_market_regime():
         return is_bull, current_close, current_sma5, current_sma200, current_upper, current_lower
         
     except Exception as e:
-        # Clear the cache so it retries instantly next time instead of waiting an hour
         st.cache_data.clear() 
         return None, 0, 0, 0, 0, 0
 
@@ -163,12 +151,18 @@ st.sidebar.header("4. Portfolio Risk Controls")
 atr_mult = st.sidebar.slider("ATR Stop Multiplier", min_value=1.0, max_value=5.0, value=3.0, step=0.1)
 tox_cutoff = st.sidebar.slider("Toxicity Cutoff (%)", 0, 50, 10)
 
+st.sidebar.header("5. Portfolio Execution")
+port_size = st.sidebar.number_input("Portfolio Size (Target Hold)", min_value=1, max_value=100, value=10, step=1)
+sell_rank = st.sidebar.number_input("Hysteresis Sell Rank", min_value=1, max_value=200, value=25, step=1)
+
+if sell_rank <= port_size:
+    st.sidebar.warning("⚠️ Hysteresis Sell Rank should be greater than the Portfolio Size.")
+
 # -------------------------------------------------------------------
 # 3. Main UI: Data Input & Market Regime
 # -------------------------------------------------------------------
 st.title("🚀 Quant Equity Screener: MK_MOMENTUM")
 
-# Market Regime UI Banner
 regime_data = get_market_regime()
 is_bull = regime_data[0]
 
@@ -186,25 +180,19 @@ tickers = []
 
 if universe_choice == "NSE Top 500":
     st.subheader("📥 NSE Top 500 Universe")
-    st.info("Your list is automatically saved to the server. It will remain here even if you close the app.")
-    
     new_text = st.text_area("Paste NSE Top 500 Tickers:", value=st.session_state['memory_nse500'], height=150)
     if new_text != st.session_state['memory_nse500']:
         st.session_state['memory_nse500'] = new_text
         save_lists_to_file(st.session_state['memory_nse500'], st.session_state['memory_custom'], st.session_state['memory_oneoff'])
-    
     if st.session_state['memory_nse500']:
         tickers = process_raw_tickers(st.session_state['memory_nse500'])
 
 elif universe_choice == "Custom Universe (Screener)":
     st.subheader("📥 Custom Universe (Small/Micro Caps)")
-    st.info("Your list is automatically saved to the server. It will remain here even if you close the app.")
-    
     new_text = st.text_area("Paste Custom Tickers:", value=st.session_state['memory_custom'], height=150)
     if new_text != st.session_state['memory_custom']:
         st.session_state['memory_custom'] = new_text
         save_lists_to_file(st.session_state['memory_nse500'], st.session_state['memory_custom'], st.session_state['memory_oneoff'])
-    
     if st.session_state['memory_custom']:
         tickers = process_raw_tickers(st.session_state['memory_custom'])
 
@@ -233,7 +221,6 @@ elif universe_choice == "One-Off List / CSV":
     if st.session_state['memory_oneoff']:
         tickers.extend(process_raw_tickers(st.session_state['memory_oneoff']))
 
-# Deduplicate tickers
 tickers = list(set(tickers))
 st.write(f"**Total unique tickers ready for processing:** {len(tickers)}")
 
@@ -248,7 +235,6 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
     try:
         raw_data = yf.download(tickers, period="2y", progress=False)
         
-        # Safely parse multi-ticker vs single-ticker structures
         if len(tickers) == 1:
             prices_df = raw_data[['Close']].copy()
             prices_df.columns = [tickers[0]]
@@ -276,28 +262,43 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
             st.error("No tickers have enough history.")
             st.stop()
             
-        # Filter and forward-fill missing data across all price frames
         prices_df = prices_df[valid_tickers].ffill(limit=5)
         high_df = high_df[valid_tickers].ffill(limit=5)
         low_df = low_df[valid_tickers].ffill(limit=5)
         
-        progress_bar.progress(40)
+        progress_bar.progress(35)
+        status_text.text("Applying Dual-Momentum Filter (Price > 100-SMA)...")
+        
+        # Dual-Momentum Entry Logic
+        sma100 = prices_df.rolling(window=100).mean().iloc[-1]
+        current_price = prices_df.iloc[-1]
+        
+        valid_dual_mom = current_price[current_price > sma100].index.tolist()
+        
+        if not valid_dual_mom:
+            st.warning("No stocks passed the Dual-Momentum filter (Price > 100-SMA).")
+            st.stop()
+            
+        # Keep only the stocks that passed the trend filter
+        prices_df = prices_df[valid_dual_mom]
+        high_df = high_df[valid_dual_mom]
+        low_df = low_df[valid_dual_mom]
+        current_price = current_price[valid_dual_mom]
+        
+        progress_bar.progress(45)
         status_text.text("Calculating 14-Day Average True Range (ATR)...")
 
-        # Calculate True Range (Vectorized)
         prev_close = prices_df.shift(1)
         tr1 = high_df - low_df
         tr2 = (high_df - prev_close).abs()
         tr3 = (low_df - prev_close).abs()
         
         true_range = np.maximum(tr1, np.maximum(tr2, tr3))
-        # 14-Day Simple Moving Average of True Range
         atr_14 = true_range.rolling(window=14).mean().iloc[-1]
 
         progress_bar.progress(55)
         status_text.text("Calculating Multi-Timeframe Blended Returns & Risk...")
 
-        current_price = prices_df.iloc[-1]
         P_skip = prices_df.iloc[-(1 + skip_days)]
         P_12M = prices_df.iloc[-(252 + skip_days + 1)]
         P_6M = prices_df.iloc[-(126 + skip_days + 1)]
@@ -348,7 +349,6 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         w_tot = w_total if w_total > 0 else 1
         Score_Final = ((w1/w_tot) * Percentile_ScoreRaw) + ((w2/w_tot) * Percentile_NearHigh) + ((w3/w_tot) * Percentile_Quality)
 
-        # Calculate Dynamic ATR Stop Loss
         atr_stop_loss = current_price - (atr_14 * atr_mult)
 
         results_df = pd.DataFrame({
@@ -361,15 +361,32 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
             'ATR Stop-Loss (₹)': atr_stop_loss.values
         }).sort_values(by='Score_Final', ascending=False).reset_index(drop=True)
         
+        # Apply Ranking
         results_df.index = results_df.index + 1
         results_df.index.name = 'Rank'
         
+        # Apply Action Logic (Rank Hysteresis)
+        action_conditions = [
+            (results_df.index <= port_size),
+            (results_df.index > port_size) & (results_df.index <= sell_rank)
+        ]
+        action_choices = [
+            '🟢 BUY / STRONG HOLD',
+            '🟡 HOLD (Buffer Zone)'
+        ]
+        results_df['Action'] = np.select(action_conditions, action_choices, default='🔴 SELL / REPLACE')
+        
+        # Reorder columns to display Action prominently
+        cols = ['Action', 'Ticker', 'Price (₹)', 'Score_Final', 'Blended Return (%)', 'Downside Dev (%)', 'NearHigh Ratio', 'ATR Stop-Loss (₹)']
+        results_df = results_df[cols]
+        
+        # Formatting
         for col in ['Price (₹)', 'Score_Final', 'Blended Return (%)', 'Downside Dev (%)', 'ATR Stop-Loss (₹)']:
             results_df[col] = results_df[col].round(2)
         results_df['NearHigh Ratio'] = results_df['NearHigh Ratio'].round(3)
 
         progress_bar.progress(100)
-        status_text.success(f"✅ Calculation complete! {len(results_df)} stocks qualified.")
+        status_text.success(f"✅ Calculation complete! {len(results_df)} stocks passed the 100-SMA filter and qualified.")
 
         st.subheader("🏆 Leaderboard")
         st.dataframe(
