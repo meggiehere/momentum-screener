@@ -356,15 +356,25 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         w_tot = w_total if w_total > 0 else 1
         Score_Final = ((w1/w_tot) * Percentile_ScoreRaw) + ((w2/w_tot) * Percentile_NearHigh) + ((w3/w_tot) * Percentile_Quality)
 
-        # Volatility-Adjusted Position Sizing
+        # -------------------------------------------------------------------
+        # Volatility-Adjusted Position Sizing with Cash Budget Cap
+        # -------------------------------------------------------------------
         atr_stop_loss = current_price - (atr_14 * atr_mult)
         risk_per_share = current_price - atr_stop_loss
         
         # Prevent division by zero mathematically if risk per share is somehow 0
         risk_per_share = risk_per_share.replace(0, 0.01)
         
+        # Risk-Based Shares
         total_risk_amount = account_capital * (max_risk_pct / 100.0)
-        shares_to_buy = np.floor(total_risk_amount / risk_per_share).fillna(0).astype(int)
+        risk_based_shares = total_risk_amount / risk_per_share
+        
+        # Cash Budget Shares
+        cash_budget_per_stock = account_capital / port_size
+        max_cash_shares = cash_budget_per_stock / current_price
+        
+        # Final Shares (Minimum of Risk-Based and Cash-Budget, Floored)
+        shares_to_buy = np.floor(np.minimum(risk_based_shares, max_cash_shares)).fillna(0).astype(int)
 
         results_df = pd.DataFrame({
             'Ticker': Score_Final.index,
