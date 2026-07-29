@@ -152,6 +152,8 @@ atr_mult = st.sidebar.slider("ATR Stop Multiplier", min_value=1.0, max_value=5.0
 tox_cutoff = st.sidebar.slider("Toxicity Cutoff (%)", 0, 50, 10)
 
 st.sidebar.header("5. Portfolio Execution")
+account_capital = st.sidebar.number_input("Total Account Capital (₹)", min_value=10000.0, value=1000000.0, step=10000.0)
+max_risk_pct = st.sidebar.number_input("Max Risk Per Trade (%)", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
 port_size = st.sidebar.number_input("Portfolio Size (Target Hold)", min_value=1, max_value=100, value=10, step=1)
 sell_rank = st.sidebar.number_input("Hysteresis Sell Rank", min_value=1, max_value=200, value=25, step=1)
 
@@ -320,19 +322,10 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         High_52W = prices_df.rolling(nh_lookback).max().iloc[-1]
         NearHigh = current_price / High_52W
         
-        # -------------------------------------------------------------------
-        # NEW QUALITY METRIC: R-Squared (R^2) of Price vs. Linear Time
-        # -------------------------------------------------------------------
-        # We create a linear time array and correlate it with the price dataframe
+        # QUALITY METRIC: R-Squared (R^2) of Price vs. Linear Time
         time_seq = pd.Series(np.arange(len(prices_df)), index=prices_df.index)
-        
-        # Calculate rolling Pearson Correlation (R)
         rolling_r = prices_df.rolling(window=dd_lookback).corr(time_seq)
-        
-        # Square the correlation to get R^2, but multiply by the sign of R 
-        # to ensure perfect linear downtrends are penalized with negative values.
         rolling_r2 = (rolling_r ** 2) * np.sign(rolling_r)
-        
         Quality = rolling_r2.iloc[-1]
 
         if tox_cutoff > 0:
@@ -363,11 +356,20 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         w_tot = w_total if w_total > 0 else 1
         Score_Final = ((w1/w_tot) * Percentile_ScoreRaw) + ((w2/w_tot) * Percentile_NearHigh) + ((w3/w_tot) * Percentile_Quality)
 
+        # Volatility-Adjusted Position Sizing
         atr_stop_loss = current_price - (atr_14 * atr_mult)
+        risk_per_share = current_price - atr_stop_loss
+        
+        # Prevent division by zero mathematically if risk per share is somehow 0
+        risk_per_share = risk_per_share.replace(0, 0.01)
+        
+        total_risk_amount = account_capital * (max_risk_pct / 100.0)
+        shares_to_buy = np.floor(total_risk_amount / risk_per_share).fillna(0).astype(int)
 
         results_df = pd.DataFrame({
             'Ticker': Score_Final.index,
             'Price (₹)': current_price.values,
+            'Shares to Buy': shares_to_buy.values,
             'Score_Final': Score_Final.values,
             'Blended Return (%)': R_blend.values * 100,
             'Downside Dev (%)': DD_126.values * 100,
@@ -390,8 +392,8 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         ]
         results_df['Action'] = np.select(action_conditions, action_choices, default='🔴 SELL / REPLACE')
         
-        # Reorder columns to display Action prominently
-        cols = ['Action', 'Ticker', 'Price (₹)', 'Score_Final', 'Blended Return (%)', 'Downside Dev (%)', 'NearHigh Ratio', 'ATR Stop-Loss (₹)']
+        # Reorder columns to display Action and Size prominently
+        cols = ['Action', 'Ticker', 'Price (₹)', 'Shares to Buy', 'Score_Final', 'Blended Return (%)', 'Downside Dev (%)', 'NearHigh Ratio', 'ATR Stop-Loss (₹)']
         results_df = results_df[cols]
         
         # Formatting
