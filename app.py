@@ -314,12 +314,26 @@ if st.button("🚀 Run Momentum Engine") and len(tickers) > 0:
         DD_126 = np.sqrt((negative_returns ** 2).rolling(dd_lookback).sum().iloc[-1] / dd_lookback)
 
         progress_bar.progress(70)
-        status_text.text("Evaluating Proximity & Quality...")
+        status_text.text("Evaluating Proximity & Quality (Linear Regression R²)...")
 
         Score_raw = R_blend / (DD_126 + 0.002)
         High_52W = prices_df.rolling(nh_lookback).max().iloc[-1]
         NearHigh = current_price / High_52W
-        Quality = (daily_returns > 0).rolling(dd_lookback).sum().iloc[-1] / dd_lookback
+        
+        # -------------------------------------------------------------------
+        # NEW QUALITY METRIC: R-Squared (R^2) of Price vs. Linear Time
+        # -------------------------------------------------------------------
+        # We create a linear time array and correlate it with the price dataframe
+        time_seq = pd.Series(np.arange(len(prices_df)), index=prices_df.index)
+        
+        # Calculate rolling Pearson Correlation (R)
+        rolling_r = prices_df.rolling(window=dd_lookback).corr(time_seq)
+        
+        # Square the correlation to get R^2, but multiply by the sign of R 
+        # to ensure perfect linear downtrends are penalized with negative values.
+        rolling_r2 = (rolling_r ** 2) * np.sign(rolling_r)
+        
+        Quality = rolling_r2.iloc[-1]
 
         if tox_cutoff > 0:
             dd_threshold = np.percentile(DD_126.dropna(), 100 - tox_cutoff)
