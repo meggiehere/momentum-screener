@@ -133,7 +133,9 @@ if st.button("🚀 Run Clean Engine") and tickers_input:
     cash_budget = account_capital / port_size
     shares_cash = np.floor(cash_budget / top_prices)
     shares_risk = np.floor((account_capital * (max_risk_pct / 100.0)) / (top_prices - atr_stop).replace(0, 0.01))
-    final_shares = np.minimum(shares_risk, shares_cash).clip(lower=0).astype(int)
+    
+    # FIX APPLIED HERE: Replace NaN/Infinity with 0 before converting to integer
+    final_shares = np.minimum(shares_risk, shares_cash).replace([np.inf, -np.inf], np.nan).fillna(0).clip(lower=0).astype(int)
     
     # 6. Fast Fetch Fundamentals ONLY for Top 30
     top_30 = ordered_tickers[:30].tolist()
