@@ -59,14 +59,17 @@ def get_market_regime():
         return None, 0, 0, 0, 0, 0
 
 # -------------------------------------------------------------------
-# Helper: Bulk Fundamental Fetching (Layer 2)
+# Helper: Bulk Fundamental & Valuation Fetching (Layer 2)
 # -------------------------------------------------------------------
 def get_bulk_fundamentals(tickers):
     fundamental_results = {}
     for t in tickers:
+        tag = "⚪ Data Unavailable"
+        iv = 0.0
         try:
             tk = yf.Ticker(t)
-            # Fetch quarterly net income for QoQ check
+            
+            # 1. Fetch EPS Acceleration (QoQ)
             q_fin = tk.quarterly_financials
             if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
                 net_inc = q_fin.loc['Net Income'].dropna()
@@ -75,11 +78,22 @@ def get_bulk_fundamentals(tickers):
                     tag = "🟢 EPS Accelerating" if is_accel else "🔴 EPS Declining"
                 else:
                     tag = "⚪ Limited Qtr Data"
-            else:
-                tag = "⚪ Data Unavailable"
+
+            # 2. Fetch Intrinsic Value Data (Sharma/Graham Proxy)
+            info = tk.info
+            eps = info.get('trailingEps', 0)
+            bv = info.get('bookValue', 0)
+            
+            if eps and bv and eps > 0 and bv > 0:
+                iv = np.sqrt(22.5 * eps * bv)
+                
         except Exception:
             tag = "⚪ Fetch Error"
-        fundamental_results[t] = tag
+            
+        fundamental_results[t] = {
+            "qoq_tag": tag,
+            "intrinsic_value": iv
+        }
     return fundamental_results
 
 # -------------------------------------------------------------------
@@ -94,7 +108,8 @@ st.title("🚀 MK_QUANT_ALPHA: Master Unified Dashboard")
 # -------------------------------------------------------------------
 st.sidebar.title("⚙️ Engine Controls")
 
-st.sidebar.header("0. Universe Input")
+st.sidebar.header("0. Macro & Opportunity Cost")
+risk_free_rate = st.sidebar.number_input("India 10-Yr Bond Yield (%)", min_value=1.0, max_value=15.0, value=7.1, step=0.1)
 universe_choice = st.sidebar.selectbox("Target Universe:", ["NSE Top 500", "Custom Universe (Screener)", "One-Off List / CSV"])
 
 st.sidebar.header("1. Portfolio Execution & Risk")
@@ -112,7 +127,7 @@ st.sidebar.header("3. Extension & Risk Parameters")
 ema_period = st.sidebar.slider("Entry EMA Window", 10, 50, 20)
 max_ext_pct = st.sidebar.slider("Max Buy Extension (%)", 1.0, 10.0, 5.0, step=0.5)
 atr_mult = st.sidebar.slider("ATR Stop Multiplier", 1.0, 5.0, 3.0, step=0.1)
-check_fundamentals = st.sidebar.checkbox("Enable Layer 2 Fundamentals (QoQ Net Income)", value=True)
+check_fundamentals = st.sidebar.checkbox("Enable Layer 2 Fundamentals & Valuation", value=True)
 
 # -------------------------------------------------------------------
 # 3. Macro Regime Header (Layer 1)
@@ -124,10 +139,15 @@ if 'memory_oneoff' not in st.session_state: st.session_state['memory_oneoff'] = 
 
 is_bull, nse_close, sma5, sma200, upper_band, lower_band = get_market_regime()
 
-if is_bull:
-    st.success(f"🟢 **MACRO REGIME: BULLISH** | Nifty 50 5-DMA ({sma5:.0f}) > Upper Hysteresis Band ({upper_band:.0f}). Systemic Liquidity Expanding.")
-else:
-    st.error(f"🔴 **MACRO REGIME: BEARISH** | Nifty 50 5-DMA ({sma5:.0f}) < Lower Hysteresis Band ({lower_band:.0f}). Capital Protection Active.")
+# Display Macro & Opportunity Cost
+col1, col2 = st.columns(2)
+with col1:
+    if is_bull:
+        st.success(f"🟢 **MACRO REGIME: BULLISH** | Nifty 50 5-DMA ({sma5:.0f}) > Upper Band ({upper_band:.0f}).")
+    else:
+        st.error(f"🔴 **MACRO REGIME: BEARISH** | Nifty 50 5-DMA ({sma5:.0f}) < Lower Band ({lower_band:.0f}).")
+with col2:
+    st.info(f"⚖️ **OPPORTUNITY COST:** India 10-Yr Bond Yield is **{risk_free_rate}%**. This is your equity hurdle rate.")
 
 st.markdown("---")
 
@@ -188,6 +208,7 @@ if st.button("🚀 Run Master Engine") and len(tickers) > 0:
 
         sma100 = prices_df.rolling(100).mean().iloc[-1]
         current_price = prices_df.iloc[-1]
+        high_50 = high_df.rolling(50).max().iloc[-1]
         
         valid_mom = current_price[current_price > sma100].index.tolist()
         if not valid_mom:
@@ -196,6 +217,7 @@ if st.button("🚀 Run Master Engine") and len(tickers) > 0:
 
         prices_df, high_df, low_df = prices_df[valid_mom], high_df[valid_mom], low_df[valid_mom]
         current_price = current_price[valid_mom]
+        high_50 = high_50[valid_mom]
 
         progress_bar.progress(40)
         status_text.text("Calculating 20-EMA Extension & ATR Stop-Loss...")
@@ -228,7 +250,6 @@ if st.button("🚀 Run Master Engine") and len(tickers) > 0:
         rolling_r = prices_df.rolling(126).corr(time_seq)
         Quality = ((rolling_r ** 2) * np.sign(rolling_r)).iloc[-1]
 
-        # Percentile Normalization
         def percentile(s):
             return (s.rank(method='min') - 1) / (len(s) - 1) * 100.0 if len(s) > 1 else pd.Series(100.0, index=s.index)
 
@@ -237,13 +258,13 @@ if st.button("🚀 Run Master Engine") and len(tickers) > 0:
 
         progress_bar.progress(80)
         
-        # Fundamental Check (Layer 2)
-        fund_tags = {}
+        # Fundamental & Valuation Check (Layer 2)
+        fund_data = {}
         if check_fundamentals:
-            status_text.text("Fetching Layer 2 Fundamental Data (QoQ Net Income)...")
-            fund_tags = get_bulk_fundamentals(valid_mom)
+            status_text.text("Fetching Fundamentals (EPS, Book Value, Intrinsic Value)...")
+            fund_data = get_bulk_fundamentals(valid_mom)
         else:
-            fund_tags = {t: "⚪ Filter Disabled" for t in valid_mom}
+            fund_data = {t: {"qoq_tag": "⚪ Disabled", "intrinsic_value": 0.0} for t in valid_mom}
 
         # Sizing & Execution Math
         cash_budget_per_stock = account_capital / port_size
@@ -255,14 +276,21 @@ if st.button("🚀 Run Master Engine") and len(tickers) > 0:
 
         final_shares = np.minimum(max_shares_risk, max_shares_cash).clip(lower=0).astype(int)
 
+        # Map Sharma Parameters (Valuation & Pyramiding)
+        ordered_tickers = Score_Final.index
+        qoq_tags = [fund_data.get(t, {}).get("qoq_tag", "⚪ N/A") for t in ordered_tickers]
+        iv_vals = [fund_data.get(t, {}).get("intrinsic_value", 0.0) for t in ordered_tickers]
+        
         # Build Master Output
         df = pd.DataFrame({
-            'Ticker': Score_Final.index,
+            'Ticker': ordered_tickers,
             'Price (₹)': current_price.values,
             'Shares to Buy': final_shares.values,
             'Score_Final': Score_Final.values,
             'Entry Status': np.where(is_extended, "🟡 EXTENDED (Wait Dip)", "🟢 IN BUY ZONE"),
-            'Fundamental Health': [fund_tags.get(t, "⚪ N/A") for t in Score_Final.index],
+            'Buy Execution Type': np.where(current_price.values >= (high_50[ordered_tickers].values * 0.98), "🔥 PYRAMID BUY (Breakout)", "🟢 BASE BUY (Initial)"),
+            'Intrinsic Value (₹)': iv_vals,
+            'Fundamental Health': qoq_tags,
             'Blended Return (%)': R_blend.values * 100,
             'R² Quality': Quality.values,
             '20-EMA (₹)': ema_20.values,
@@ -271,6 +299,20 @@ if st.button("🚀 Run Master Engine") and len(tickers) > 0:
 
         df.index += 1
         df.index.name = 'Rank'
+
+        # Valuation Processing
+        df['Price-to-Value (%)'] = np.where(df['Intrinsic Value (₹)'] > 0, (df['Price (₹)'] / df['Intrinsic Value (₹)']) * 100, np.nan)
+        val_tags = []
+        for p, iv in zip(df['Price (₹)'], df['Intrinsic Value (₹)']):
+            if pd.isna(iv) or iv == 0:
+                val_tags.append("⚪ N/A")
+            elif p < iv:
+                val_tags.append("🟢 Value Discount")
+            elif p > (2 * iv):
+                val_tags.append("🔴 High Premium")
+            else:
+                val_tags.append("🟡 Fair Premium")
+        df.insert(7, 'Valuation Status', val_tags)
 
         # Unified Action Tags
         actions = []
@@ -291,12 +333,12 @@ if st.button("🚀 Run Master Engine") and len(tickers) > 0:
 
         df.insert(0, 'Action Tag', actions)
 
-        # Rounding
-        for col in ['Price (₹)', 'Score_Final', 'Blended Return (%)', 'R² Quality', '20-EMA (₹)', 'ATR Stop-Loss (₹)']:
+        # Rounding for cleanliness
+        for col in ['Price (₹)', 'Score_Final', 'Intrinsic Value (₹)', 'Price-to-Value (%)', 'Blended Return (%)', 'R² Quality', '20-EMA (₹)', 'ATR Stop-Loss (₹)']:
             df[col] = df[col].round(2)
 
         progress_bar.progress(100)
-        status_text.success(f"✅ Analysis Complete! {len(df)} stocks evaluated across all 4 Layers.")
+        status_text.success(f"✅ Analysis Complete! {len(df)} stocks evaluated across all Macro, Momentum, and Fundamental Layers.")
 
         # Display Master Dashboard
         st.subheader("🏆 Unified Master Leaderboard")
