@@ -4,6 +4,7 @@ import numpy as np
 import yfinance as yf
 import json
 import os
+import time
 
 # -------------------------------------------------------------------
 # File Storage Setup (For Permanent Memory)
@@ -94,6 +95,10 @@ def get_bulk_fundamentals(tickers):
             "qoq_tag": tag,
             "intrinsic_value": iv
         }
+        
+        # API Throttler: Pause for 200 milliseconds to avoid rate limits
+        time.sleep(0.2)
+        
     return fundamental_results
 
 # -------------------------------------------------------------------
@@ -109,7 +114,8 @@ st.title("🚀 MK_QUANT_ALPHA: Master Unified Dashboard")
 st.sidebar.title("⚙️ Engine Controls")
 
 st.sidebar.header("0. Macro & Opportunity Cost")
-risk_free_rate = st.sidebar.number_input("India 10-Yr Bond Yield (%)", min_value=1.0, max_value=15.0, value=7.1, step=0.1)
+# The India 10Y Bond Yield was ~6.81% in late July 2026.
+risk_free_rate = st.sidebar.number_input("India 10-Yr Bond Yield (%)", min_value=1.0, max_value=15.0, value=6.81, step=0.1)
 universe_choice = st.sidebar.selectbox("Target Universe:", ["NSE Top 500", "Custom Universe (Screener)", "One-Off List / CSV"])
 
 st.sidebar.header("1. Portfolio Execution & Risk")
@@ -258,13 +264,19 @@ if st.button("🚀 Run Master Engine") and len(tickers) > 0:
 
         progress_bar.progress(80)
         
-        # Fundamental & Valuation Check (Layer 2)
+        # ---------------------------------------------------------
+        # ALL-STOCKS FETCH (With Throttler)
+        # ---------------------------------------------------------
         fund_data = {}
         if check_fundamentals:
-            status_text.text("Fetching Fundamentals (EPS, Book Value, Intrinsic Value)...")
+            status_text.text(f"Fetching Fundamentals for all {len(valid_mom)} stocks (This may take several minutes)...")
+            
+            # Fetch data for ALL stocks that passed the momentum filter
             fund_data = get_bulk_fundamentals(valid_mom)
         else:
             fund_data = {t: {"qoq_tag": "⚪ Disabled", "intrinsic_value": 0.0} for t in valid_mom}
+
+        # ---------------------------------------------------------
 
         # Sizing & Execution Math
         cash_budget_per_stock = account_capital / port_size
